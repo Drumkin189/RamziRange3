@@ -57,15 +57,72 @@ those problems — see [⚙️ Tuning notes](#️-tuning-notes-how-an-18-hour-sc
 
 ---
 
-## ⚡ Quick start
+## ⚡ Deploy it
+
+### Prerequisites
+
+| Need | Why |
+|---|---|
+| 🐳 **Docker + Compose v2** | `docker compose version` should print v2.x. Compose v1 (`docker-compose`) won't parse the healthcheck conditions. |
+| 🌐 **Internet for the first build only** | The images pull base layers, `pip install`, and vendor AngularJS. After that the range is fully self-contained and makes no outbound calls. |
+| 🔌 **Port 9600 free** | The only published port. Change the left-hand side of `"9600:9600"` in `docker-compose.yml` if it clashes. |
+| 🧱 **An isolated network** | See the warning at the top. This is not optional. |
+
+### Two commands
 
 ```bash
-git clone <this-repo> && cd RamziRange9
-docker compose up -d --build
+git clone https://github.com/<you>/<repo>.git
+cd <repo>
+docker compose up -d --build --wait
 ```
 
-Then open **`http://<host>:9600/`**. The landing page is a live catalog of every
+That's it. `--wait` blocks until the healthchecks pass, so when the command
+returns the range is genuinely ready.
+
+> [!TIP]
+> **If you omit `--wait`, give it ~40 seconds.** The app deliberately blocks
+> until MariaDB has finished its first-boot initialisation and the schema is
+> seeded, so nginx will answer **502** until then. That's expected, not a fault.
+
+If your user isn't in the `docker` group, prefix with `sudo`.
+
+### Confirm it's up
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:9600/     # expect 200
+docker compose ps                                                    # all healthy
+```
+
+Then open **`http://<host>:9600/`** — the landing page is a live catalog of every
 endpoint, grouped by weakness ID, each one a working link.
+
+### Prove it's actually vulnerable
+
+```bash
+# SQL injection - throws a real MySQL syntax error
+curl -s "http://localhost:9600/sqli/query?id=1'" | grep -o 'error in your SQL'
+
+# OS command injection - runs as root
+curl -s --get --data-urlencode 'host=127.0.0.1;id' \
+     http://localhost:9600/cmd/ping | grep -o 'uid=0(root)'
+
+# Path traversal
+curl -s "http://localhost:9600/files/read?file=../../etc/passwd" | head -1
+
+# CRLF injection - the injected header really lands on the wire
+curl -sD- -o /dev/null \
+     "http://localhost:9600/prefs?lang=en%0d%0aX-Injected:%20yes" | grep -i x-injected
+
+# The developer-only portal (nothing else gets in)
+curl -si -d 'username=developer1&password=nodezero' \
+     http://localhost:9600/dev/login | grep -i 'set-cookie: devsid'
+```
+
+### Shut it down
+
+```bash
+docker compose down -v      # -v also drops the database volume
+```
 
 ```
 ┌─────────────────────────────────────────────────────────┐

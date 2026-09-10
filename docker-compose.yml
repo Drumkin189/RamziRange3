@@ -1,0 +1,74 @@
+name: ramzirange9
+
+# RamziRange9 - deliberately vulnerable web app range on port 9600.
+# One carrier endpoint per weakness ID. Isolated lab networks ONLY.
+#
+# Bring it up with:   docker compose up -d --build --wait
+# The --wait flag blocks until the healthchecks below pass, so you never get
+# handed a 502 while MariaDB is still doing its first-boot initialisation
+# (~30-40s). Without it, be patient for half a minute.
+
+services:
+  proxy:
+    image: nginx:1.27-alpine
+    container_name: rr9-proxy
+    ports:
+      - "9600:9600"
+    volumes:
+      - ./proxy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      rr9app:
+        condition: service_healthy
+    networks: [range]
+    restart: unless-stopped
+    # No healthcheck on the proxy on purpose: depends_on(service_healthy) above
+    # already guarantees it starts after the app is serving, and a healthcheck
+    # here only adds a race that can report a false "unhealthy" and make
+    # `up --wait` exit non-zero.
+
+  rr9app:
+    build: ./app
+    container_name: rr9-app
+    depends_on:
+      rr9_db:
+        condition: service_healthy
+      internal-admin:
+        condition: service_started
+    networks: [range]
+    restart: unless-stopped
+    healthcheck:
+      # the app blocks in init_db() until MariaDB answers, so it only starts
+      # listening once the schema is seeded -- this is the real readiness gate
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5000/ >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 4s
+      retries: 24
+      start_period: 15s
+
+  # Internal-only SSRF target: NO host port, reachable only from inside the
+  # docker network. That is what makes /net/fetch a real SSRF finding rather
+  # than a reflected URL.
+  internal-admin:
+    build: ./internal-admin
+    container_name: rr9-internal-admin
+    networks: [range]
+    restart: unless-stopped
+
+  rr9_db:
+    image: mariadb:10.5
+    container_name: rr9-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=rr9
+    networks: [range]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -proot --silent || exit 1"]
+      interval: 5s
+      timeout: 4s
+      retries: 24
+      start_period: 10s
+
+networks:
+  range:
+    driver: bridge
